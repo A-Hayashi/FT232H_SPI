@@ -3,35 +3,20 @@ using System.Collections.Generic;
 using System.Text;
 using System.Threading;
 using FTD2XX_NET;
-
-
+using static FTD2XX_NET.FTDI;
 
 namespace EEPROM
 {
     class Program
     {
-        public const byte FT232R_TXD = 0x01;
-        public const byte FT232R_RXD = 0x02;
-        public const byte FT232R_RTSn = 0x04;
-        public const byte FT232R_CTSn = 0x08;
-        public const byte FT232R_DTRn = 0x10;
-        public const byte FT232R_DSRn = 0x20;
-        public const byte FT232R_DCDn = 0x40;
-        public const byte FT232R_RIn = 0x80;
+        private const int MemSize = 1024;
 
-        // SPI pin mapping
-        public const byte SPI_CSn = (FT232R_RTSn);
-        public const byte SPI_CLK = (FT232R_CTSn);
-        public const byte SPI_MOSI = (FT232R_TXD);
-        public const byte SPI_MISO = (FT232R_RXD);
+        private static FTDI myFtdiDevice;
+        private static byte[] DataOutBuffer = new byte[MemSize];
+        private static byte[] DataInBuffer = new byte[MemSize];
+        private static int dwNumBytesToSend = 0;
 
-        // read/write port
-        public const byte READ_PORT = (SPI_MISO);
-        public const byte WRITE_PORT = (SPI_MOSI | SPI_CSn | SPI_CLK);
-
-        public static FTDI myFtdiDevice;
-
-        static void SPI_Initialize(uint baudrate)
+        private static bool FT232H_Initial()
         {
 
             UInt32 ftdiDeviceCount = 0;
@@ -53,7 +38,7 @@ namespace EEPROM
                 // Wait for a key press
                 Console.WriteLine("Failed to get number of devices (error " + ftStatus.ToString() + ")");
                 Console.ReadKey();
-                return;
+                return false;
             }
 
             // If no devices available, return
@@ -62,7 +47,7 @@ namespace EEPROM
                 // Wait for a key press
                 Console.WriteLine("Failed to get number of devices (error " + ftStatus.ToString() + ")");
                 Console.ReadKey();
-                return;
+                return false;
             }
 
             // Allocate storage for device info list
@@ -86,7 +71,6 @@ namespace EEPROM
                 }
             }
 
-
             // Open first device in our list by serial number
             ftStatus = myFtdiDevice.OpenByDescription("FT232H");
             if (ftStatus != FTDI.FT_STATUS.FT_OK)
@@ -94,193 +78,258 @@ namespace EEPROM
                 // Wait for a key press
                 Console.WriteLine("Failed to open device (error " + ftStatus.ToString() + ")");
                 Console.ReadKey();
-                return;
+                return false;
             }
 
-            myFtdiDevice.SetBitMode(0x00, FTDI.FT_BIT_MODES.FT_BIT_MODE_RESET);
-
-            myFtdiDevice.SetBitMode(unchecked((byte)~(READ_PORT)), FTDI.FT_BIT_MODES.FT_BIT_MODE_SYNC_BITBANG);
-
-            myFtdiDevice.SetBaudRate(baudrate);
-
-            myFtdiDevice.Purge(FTDI.FT_PURGE.FT_PURGE_RX | FTDI.FT_PURGE.FT_PURGE_TX);
-
-            SPI_Stop();
+            return true;
         }
 
-        static void SPI_Start()
+        private static void SPI_CSEnable()
         {
-            byte[] bits = new byte[1];
-            uint bytes = 0;
-
-            myFtdiDevice.GetPinStates(ref bits[0]);
-
-            // rise CS#
-            bits[0] &= unchecked((byte)~(SPI_CSn));
-
-            myFtdiDevice.Write(bits, 1, ref bytes);
-            myFtdiDevice.Read(bits, 1, ref bytes);
-        }
-
-        static void SPI_Stop()
-        {
-            byte[] bits = new byte[1];
-            uint bytes = 0;
-
-            myFtdiDevice.GetPinStates(ref bits[0]);
-
-            // rise CS#
-            bits[0] |= (SPI_CSn);
-
-            myFtdiDevice.Write(bits, 1, ref bytes);
-            myFtdiDevice.Read(bits, 1, ref bytes);
-        }
-
-
-
-        public static int SPI_WRITE_BLOCK_SIZE = 1024;
-        static void SPI_Write(int len, byte[] wBuf, int idx)
-        {
-            byte bits = 0;
-            uint bytes = 0;
-
-            byte[] writeBuf = new byte[16 * SPI_WRITE_BLOCK_SIZE];
-            byte[] readBuf = new byte[16 * SPI_WRITE_BLOCK_SIZE];
-
-            if (len > SPI_WRITE_BLOCK_SIZE)
+            for (int i = 0; i < 5; i++)
             {
-                // divide
-                for (int i = 0; i < len; i += SPI_WRITE_BLOCK_SIZE)
-                {
-                    int size = (len - i > SPI_WRITE_BLOCK_SIZE) ? (SPI_WRITE_BLOCK_SIZE) : (len - i);
-                    SPI_Write(size, wBuf, i);
-                }
-                return;
-            }
-
-            myFtdiDevice.GetPinStates(ref bits);
-
-            // clear MOSI and CLK bit
-            bits &= unchecked((byte)~(SPI_MOSI | SPI_CLK));
-
-            for (int i = 0; i < len; i++)
-            {
-                byte data = wBuf[idx + i];
-
-                // generate signal
-                for (int j = 0; j < 8; j++)
-                {
-                    // fall CLK and set MOSI
-                    if ((data & 0x80) != 0x00)
-                    {
-                        writeBuf[2 * (i * 8 + j) + 0] = (byte)(bits | SPI_MOSI);
-                    }
-                    else
-                    {
-                        writeBuf[2 * (i * 8 + j) + 0] = bits;
-                    }
-
-                    // rise CLK
-                    if ((data & 0x80) != 0x00)
-                    {
-                        writeBuf[2 * (i * 8 + j) + 1] = (byte)(bits | SPI_MOSI | SPI_CLK);
-                    }
-                    else
-                    {
-                        writeBuf[2 * (i * 8 + j) + 1] = (byte)(bits | SPI_CLK);
-                    }
-
-                    // shift
-                    data = (byte)(data << 1);
-                }
-            }
-
-            myFtdiDevice.Write(writeBuf, 16 * len, ref bytes);
-            myFtdiDevice.Read(readBuf, (uint)(16 * len), ref bytes);
-
-            if (bytes != 16 * len)
-            {
-                Console.WriteLine("Error! FT_Write reported value too short.");
+                DataOutBuffer[dwNumBytesToSend++] = 0x80;
+                DataOutBuffer[dwNumBytesToSend++] = 0x08;
+                DataOutBuffer[dwNumBytesToSend++] = 0x0b;
             }
         }
 
-
-        public static int SPI_READ_BLOCK_SIZE = 4096;
-
-        static void SPI_Read(int len, byte[] rBuf, int idx)
+        private static void SPI_CSDisnable()
         {
-            byte bits = 0;
-            uint bytes = 0;
-            byte[] writeBuf = new byte[16 * SPI_READ_BLOCK_SIZE];
-            byte[] readBuf = new byte[16 * SPI_READ_BLOCK_SIZE];
-
-            if (len > SPI_READ_BLOCK_SIZE)
+            for (int i = 0; i < 5; i++)
             {
-                // divide
-                for (int i = 0; i < len; i += SPI_READ_BLOCK_SIZE)
+                DataOutBuffer[dwNumBytesToSend++] = 0x80;
+                DataOutBuffer[dwNumBytesToSend++] = 0x00;
+                DataOutBuffer[dwNumBytesToSend++] = 0x0b;
+            }
+        }
+
+        private static bool SPI_Initial()
+        {
+            uint dwNumInputBuffer = 0;
+            uint dwNumBytesRead = 0;
+            uint dwNumBytesSent = 0;
+            byte[] InputBuffer = new byte[512];
+            FT_STATUS ftStatus;
+
+            ftStatus = myFtdiDevice.ResetDevice();      //USBデバイスをリセットする
+
+
+            {   //USB受信バッファを空にする
+                ftStatus |= myFtdiDevice.GetRxBytesAvailable(ref dwNumInputBuffer);
+
+                if ((ftStatus == FT_STATUS.FT_OK) && (dwNumInputBuffer > 0))
                 {
-                    int size = (len - i > SPI_READ_BLOCK_SIZE) ? (SPI_READ_BLOCK_SIZE) : (len - i);
-                    SPI_Read(size, rBuf, i);
+                    ftStatus |= myFtdiDevice.Read(InputBuffer, dwNumInputBuffer, ref dwNumBytesRead);
                 }
-                return;
             }
 
-            myFtdiDevice.GetPinStates(ref bits);
+            //ftStatus |= myFtdiDevice.FT_SetUSBParameters(ftHandle, 65535, 65535); //Set USB
+            //request transfer size
 
-            bits &= unchecked((byte)~(SPI_MOSI | SPI_CLK));
+            ftStatus |= myFtdiDevice.SetCharacters(0, false, 0, false);
 
-            // generate clk
-            for (int i = 0; i < 8 * len; i++)
+            ftStatus |= myFtdiDevice.SetTimeouts(3000, 3000);//readタイムアウト=3s, writeタイムアウト=3s
+
+            ftStatus |= myFtdiDevice.SetLatency(1);          //レイテンシタイマ=1ms
+
+            ftStatus |= myFtdiDevice.SetBitMode(0x00, FT_BIT_MODES.FT_BIT_MODE_RESET);  //リセット
+
+            ftStatus |= myFtdiDevice.SetBitMode(0xfb, FT_BIT_MODES.FT_BIT_MODE_MPSSE);  //MPSSEモード有効
+
+            if (ftStatus != FT_STATUS.FT_OK)
             {
-                // fall CLK
-                writeBuf[2 * i + 0] = bits;
-                // rise CLK
-                writeBuf[2 * i + 1] = (byte)(bits | SPI_CLK);
+                Console.WriteLine("fail on initialize FT2232H device !");
+
+                return false;
             }
 
-            myFtdiDevice.Write(writeBuf, 16 * len, ref bytes);
-            myFtdiDevice.Read(readBuf, (uint)(16 * len), ref bytes);
+            Thread.Sleep(50);
 
-            if (bytes != 16 * len)
-            {
-                Console.WriteLine("Error! FT_Read reported value too short.");
-            }
+            {   //bad command:0xaaによりMPSSEと同期をとる
+                int dwCount = 0;
+                bool bCommandEchod = false;
 
-            for (int i = 0; i < len; i++)
-            {
-                byte data = 0;
-                for (int j = 0; j < 8; j++)
+                dwNumBytesToSend = 0;
+                DataOutBuffer[dwNumBytesToSend++] = 0xaa;
+                ftStatus = myFtdiDevice.Write(DataOutBuffer, dwNumBytesToSend, ref dwNumBytesSent);
+                do
                 {
-                    if ((readBuf[2 * (8 * i + j) + 1] & SPI_MISO) != 0)
+                    ftStatus = myFtdiDevice.GetRxBytesAvailable(ref dwNumInputBuffer);
+                } while ((dwNumInputBuffer == 0) && (ftStatus == FT_STATUS.FT_OK));
+
+                ftStatus = myFtdiDevice.Read(InputBuffer, dwNumInputBuffer, ref dwNumBytesRead);
+
+                for (dwCount = 0; dwCount < (dwNumBytesRead - 1); dwCount++)
+                {
+                    if ((InputBuffer[dwCount] == 0xfa) && (InputBuffer[dwCount + 1] == 0xaa))
                     {
-                        data = (byte)((data << 1) | 1);
-                    }
-                    else
-                    {
-                        data = (byte)((data << 1) | 0);
+                        bCommandEchod = true;
+                        break;
                     }
                 }
-                rBuf[idx + i] = data;
+                if (bCommandEchod == false)
+                {
+                    Console.WriteLine("fail to synchronize MPSSE with command '0xAA'");
+                    return false;
+                }
             }
+
+            {   //bad command:0xabによりMPSSEと同期をとる
+                int dwCount = 0;
+                bool bCommandEchod = false;
+
+                dwNumBytesToSend = 0;
+                DataOutBuffer[dwNumBytesToSend++] = 0xab;
+                ftStatus = myFtdiDevice.Write(DataOutBuffer, dwNumBytesToSend, ref dwNumBytesSent);
+                do
+                {
+                    ftStatus = myFtdiDevice.GetRxBytesAvailable(ref dwNumInputBuffer);
+                } while ((dwNumInputBuffer == 0) && (ftStatus == FT_STATUS.FT_OK));
+
+                ftStatus = myFtdiDevice.Read(InputBuffer, dwNumInputBuffer, ref dwNumBytesRead);
+
+                for (dwCount = 0; dwCount < (dwNumBytesRead - 1); dwCount++)
+                {
+                    if ((InputBuffer[dwCount] == 0xfa) && (InputBuffer[dwCount + 1] == 0xab))
+                    {
+                        bCommandEchod = true;
+                        break;
+                    }
+                }
+                if (bCommandEchod == false)
+                {
+                    Console.WriteLine("fail to synchronize MPSSE with command '0xAB'");
+                    return false;
+                }
+            }
+
+            {
+                dwNumBytesToSend = 0;
+                DataOutBuffer[dwNumBytesToSend++] = 0x8b;   //クロック5分周有効
+                DataOutBuffer[dwNumBytesToSend++] = 0x97;   //adaptive clocking無効
+                DataOutBuffer[dwNumBytesToSend++] = 0x8d; 　//3 phase data clocking無効
+                ftStatus = myFtdiDevice.Write(DataOutBuffer, dwNumBytesToSend, ref dwNumBytesSent);
+            }
+
+            {
+                //freq[MHz] = 12[MHz] / (( 1 +[(0xValueH * 256) OR 0xValueL] ) * 2)
+                //freq[MHz] = 12[MHz] / ( (1 +value) * 2)
+                //(1 +value) * 2 = 12[MHz]/freq[MHz]
+                //1 +value = 6[MHz]/freq[MHz]
+                //value = 6[MHz]/freq[MHz]-1
+                //value = 6000[kHz]/freq[kHz]-1
+
+                uint kHz = 3000;
+                uint dwClockDivisor = 6000/kHz-1;
+                dwNumBytesToSend = 0;
+                DataOutBuffer[dwNumBytesToSend++] = 0x80;          //下位バイトの方向・出力設定
+                DataOutBuffer[dwNumBytesToSend++] = 0x00;          //Value:0b0000
+                                                                   //D3:CS(0), D2:MISO(0), D1:MOSI(0), D0:SCK(0) 
+                DataOutBuffer[dwNumBytesToSend++] = 0x0b;          //Direction:0x1011 
+                                                                   //D3:CS(out), D2:MISO(in), D1:MOSI(out), D0:SCK(in) 
+
+                DataOutBuffer[dwNumBytesToSend++] = 0x86;          //ボーレート設定:3MHz
+                DataOutBuffer[dwNumBytesToSend++] = (byte)(dwClockDivisor & 0xff);  //ValueL
+                DataOutBuffer[dwNumBytesToSend++] = (byte)(dwClockDivisor >> 8);    //ValueH
+
+                ftStatus = myFtdiDevice.Write(DataOutBuffer, dwNumBytesToSend, ref dwNumBytesSent);
+            }
+
+
+            Thread.Sleep(20);
+
+            {
+                dwNumBytesToSend = 0;
+                DataOutBuffer[dwNumBytesToSend++] = 0x85;       //ループバック無効
+                ftStatus = myFtdiDevice.Write(DataOutBuffer, dwNumBytesToSend, ref dwNumBytesSent);
+            }
+
+            Thread.Sleep(30);
+
+            Console.WriteLine("SPI initial successful");
+
+            return true;
+
+        }
+
+        private static bool SPI_Write(byte[] wdata, int size)
+        {
+            FT_STATUS ftStatus;
+            uint dwNumBytesSent = 0;
+            dwNumBytesToSend = 0;
+
+            SPI_CSEnable();
+            //Clock Data Bytes Out on -ve clock edge MSB first (no read)
+            DataOutBuffer[dwNumBytesToSend++] = 0x11;
+            DataOutBuffer[dwNumBytesToSend++] = (byte)((size - 1) & 0xff);
+            DataOutBuffer[dwNumBytesToSend++] = (byte)(((size - 1) >> 8) & 0xff);
+            for (int i = 0; i < size; i++)
+            {
+                DataOutBuffer[dwNumBytesToSend++] = wdata[i];
+            }
+            SPI_CSDisnable();
+
+            ftStatus = myFtdiDevice.Write(DataOutBuffer, dwNumBytesToSend, ref dwNumBytesSent);
+
+            if (ftStatus != FT_STATUS.FT_OK)
+            {
+                Console.WriteLine("SPI write failed");
+                return false;
+            }
+
+            return true;
+        }
+
+        private static bool SPI_Read(byte[] rdata, uint size)
+        {
+            FT_STATUS ftStatus;
+            uint dwNumBytesSent = 0;
+            uint dwNumBytesRead = 0;
+            dwNumBytesToSend = 0;
+
+            SPI_CSEnable();
+            //Clock Data Bytes In on -ve clock edge MSB first (no write)
+            DataOutBuffer[dwNumBytesToSend++] = 0x24;
+            DataOutBuffer[dwNumBytesToSend++] = (byte)((size - 1) & 0xff);
+            DataOutBuffer[dwNumBytesToSend++] = (byte)(((size - 1) >> 8) & 0xff);
+            SPI_CSDisnable();
+
+            ftStatus = myFtdiDevice.Write(DataOutBuffer, dwNumBytesToSend, ref dwNumBytesSent);
+            ftStatus |= myFtdiDevice.Read(rdata, size, ref dwNumBytesRead);
+
+            if (ftStatus != FT_STATUS.FT_OK)
+            {
+                Console.WriteLine("SPI read failed");
+                return false;
+            }
+
+            return true;
         }
 
 
         static void Main(string[] args)
         {
-            int len = 256;
-            byte[] wBuf = new byte[len];
+            bool result;
 
-            for (int i = 0; i < len; i++)
+            if (FT232H_Initial())
             {
-                wBuf[i] = (byte)i;
+                result = SPI_Initial();
+            }
+            else
+            {
+                result = false;
             }
 
-            SPI_Initialize(4*10^7);
-
-            while (true)
+            if (result == true)
             {
-                SPI_Write(len, wBuf, 0);
-                Thread.Sleep(500);
+                byte[] wdata = new byte[10] { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 };
+                while (true)
+                {
+                    SPI_Write(wdata, wdata.Length);
+
+                    Thread.Sleep(1);
+                }
             }
         }
     }
