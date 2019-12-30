@@ -5,6 +5,8 @@ using System.Threading;
 using FTD2XX_NET;
 using static FTD2XX_NET.FTDI;
 
+//D3:CS(-), D2:MISO(青), D1:MOSI(黄), D0:SCK(緑)
+
 namespace EEPROM
 {
     class Program
@@ -220,7 +222,7 @@ namespace EEPROM
                 //value = 6[MHz]/freq[MHz]-1
                 //value = 6000[kHz]/freq[kHz]-1
 
-                uint kHz = 3000;
+                uint kHz = 10;
                 uint dwClockDivisor = 6000/kHz-1;
                 dwNumBytesToSend = 0;
                 DataOutBuffer[dwNumBytesToSend++] = 0x80;          //下位バイトの方向・出力設定
@@ -323,12 +325,23 @@ namespace EEPROM
 
             if (result == true)
             {
-                byte[] wdata = new byte[10] { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 };
+                byte[] wdata = new byte[1] {(byte)'R'};
+                byte[] rdata = new byte[10];
+                byte[] rdata2 = new byte[1000];
+
+                uint size = 0;
+
                 while (true)
                 {
                     SPI_Write(wdata, wdata.Length);
 
-                    Thread.Sleep(1);
+                    SPI_Read(rdata, 1);
+
+                    size = rdata[0];
+
+                    SPI_Read(rdata2, size);
+
+                    Thread.Sleep(10);
                 }
             }
         }
